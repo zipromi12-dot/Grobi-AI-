@@ -6,7 +6,7 @@
 
 // --- 1. НАСТРОЙКИ (ОБЯЗАТЕЛЬНО ЗАПОЛНИ) ---
 $bot_token    = "8518607133:AAF1g9oIOSD1DGP6WfuU_lfpGxHt7Z2gPDo";
-$chat_id      = "ID_ВАШЕЙ_ГРУППЫ"; // Пример: -100123456789
+$chat_id      = "-1003735769568"; // Пример: -100123456789
 $supabase_url = "https://oanhnetxmrjocchovlbt.supabase.co"; 
 $supabase_key = "sb_publishable_giBDTlWWtHUdtim_PavORw_FUJUBAvM";
 
