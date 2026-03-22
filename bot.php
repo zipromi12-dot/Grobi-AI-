@@ -1,27 +1,34 @@
 <?php
 /**
- * ГРОБИ-БОТ: ПЛАНИРОВЩИК ПОСТОВ
- * Настройка: Москва (MSK)
+ * ГРОБИ-БОТ: ПУБЛИКАЦИЯ + ЗАКРЕП В ОСНОВНОМ ЧАТЕ
+ * Время: Москва (MSK)
  */
 
 // --- 1. НАСТРОЙКИ ---
 $bot_token     = "8518607133:AAF1g9oIOSD1DGP6WfuU_lfpGxHt7Z2gPDo";
-$main_chat_id  = "-1003735769568"; // Основной канал/группа
-$admin_chat_id = "-1003812180726"; // Админ-чат для команд
+$main_chat_id  = "-1003735769568"; // Чат, где ПУБЛИКУЕМ и ЗАКРЕПЛЯЕМ
+$admin_chat_id = "-1003812180726"; // Чат, где ПРИНИМАЕМ команды
 
 $supabase_url  = "https://oanhnetxmrjocchovlbt.supabase.co"; 
 $supabase_key  = "sb_publishable_giBDTlWWtHUdtim_PavORw_FUJUBAvM";
 
-// --- 2. ФУНКЦИЯ API SUPABASE ---
+// --- 2. ФУНКЦИЯ API TELEGRAM ---
+function telegram_api($method, $params = []) {
+    global $bot_token;
+    $url = "https://api.telegram.org/bot$bot_token/$method";
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
+    $res = curl_exec($ch);
+    curl_close($ch);
+    return json_decode($res, true);
+}
+
+// --- 3. ФУНКЦИЯ API SUPABASE ---
 function supabase_api($method, $path, $data = null) {
     global $supabase_url, $supabase_key;
     $ch = curl_init("$supabase_url/rest/v1/$path");
-    $headers = [
-        "apikey: $supabase_key",
-        "Authorization: Bearer $supabase_key",
-        "Content-Type: application/json",
-        "Prefer: return=representation"
-    ];
+    $headers = ["apikey: $supabase_key", "Authorization: Bearer $supabase_key", "Content-Type: application/json", "Prefer: return=representation"];
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
@@ -31,35 +38,46 @@ function supabase_api($method, $path, $data = null) {
     return json_decode($response, true);
 }
 
-// --- 3. РЕЖИМ CRON (ПРОВЕРКА ВРЕМЕНИ) ---
+// --- 4. РЕЖИМ CRON (АВТО-ПОСТИНГ + ЗАКРЕП) ---
 if (isset($_GET['cron'])) {
     date_default_timezone_set('Europe/Moscow'); 
     $currentTime = date('H:i');
     $currentDate = date('Y-m-d');
 
-    // Проверяем, есть ли пост на текущую минуту
     $data = supabase_api("GET", "telegram_tasks?id=eq.1&post_date=eq.$currentDate&post_time=eq.$currentTime");
     
     if (!empty($data)) {
         $task = $data[0];
-        // Если еще не отправляли сегодня (защита от дублей в ту же минуту)
         if ($task['last_sent_date'] !== $currentDate) {
-            $text = urlencode($task['post_text']);
-            $send_url = "https://api.telegram.org/bot$bot_token/sendMessage?chat_id=$main_chat_id&text=$text&parse_mode=HTML";
+            // 1. ОТПРАВЛЯЕМ ПОСТ
+            $sent_res = telegram_api("sendMessage", [
+                "chat_id" => $main_chat_id,
+                "text" => $task['post_text'],
+                "parse_mode" => "HTML"
+            ]);
             
-            if (file_get_contents($send_url)) {
-                // Ставим отметку, что отправлено
+            if ($sent_res['ok']) {
+                $msg_id = $sent_res['result']['message_id'];
+                
+                // 2. ЗАКРЕПЛЯЕМ ПОСТ В ОСНОВНОМ ЧАТЕ
+                telegram_api("pinChatMessage", [
+                    "chat_id" => $main_chat_id,
+                    "message_id" => $msg_id,
+                    "disable_notification" => false // Уведомить участников о закрепе
+                ]);
+
+                // 3. ОТМЕЧАЕМ В БАЗЕ КАК ОТПРАВЛЕННОЕ
                 supabase_api("PATCH", "telegram_tasks?id=eq.1", ["last_sent_date" => $currentDate]);
-                echo "✅ Пост успешно опубликован!";
+                echo "✅ Опубликовано и закреплено в основном чате!";
             }
         }
     } else {
-        echo "В очереди ничего нет на $currentDate $currentTime (МСК)";
+        echo "Очередь пуста ($currentDate $currentTime MSK)";
     }
     exit;
 }
 
-// --- 4. РЕЖИМ WEBHOOK (ПРИЕМ КОМАНД) ---
+// --- 5. РЕЖИМ WEBHOOK ---
 $input = file_get_contents('php://input');
 $update = json_decode($input, true);
 
@@ -67,58 +85,51 @@ if (isset($update['message'])) {
     $msg = $update['message'];
     $text = $msg['text'] ?? '';
     $chat_id_from = $msg['chat']['id'];
-    
-    // Формируем тег пользователя
-    $username = $msg['from']['username'] ?? $msg['from']['first_name'];
-    $user_tag = "@" . str_replace('@', '', $username);
+    $user_name = $msg['from']['username'] ?? $msg['from']['first_name'];
+    $user_tag = "@" . str_replace('@', '', $user_name);
 
-    // РАБОТАЕМ ТОЛЬКО В АДМИН-ЧАТЕ
     if ($chat_id_from == $admin_chat_id) {
         
-        // --- КОМАНДА /day (ДОБАВИТЬ В ОЧЕРЕДЬ) ---
+        // КОМАНДА /day (ПЛАНИРОВАНИЕ)
         if (strpos($text, '/day') === 0) {
             $parts = explode(' ', $text, 4);
             if (count($parts) < 4) {
-                $reply = "❌ Ошибка! Используй: <code>/day 25.03.2026 18:00 Текст</code>";
+                telegram_api("sendMessage", ["chat_id" => $admin_chat_id, "text" => "❌ Формат: /day 22.03.2026 18:00 Текст", "parse_mode" => "HTML"]);
             } else {
                 $raw_date = trim($parts[1]);
                 $time = trim($parts[2]);
                 $content = trim($parts[3]);
-                
-                // Преобразуем дату для базы (ДД.ММ.ГГГГ -> ГГГГ-ММ-ДД)
                 $formatted_date = date('Y-m-d', strtotime($raw_date));
 
                 if ($formatted_date && preg_match('/^\d{2}:\d{2}$/', $time)) {
                     supabase_api("PATCH", "telegram_tasks?id=eq.1", [
-                        "post_date" => $formatted_date,
-                        "post_time" => $time,
-                        "post_text" => $content,
-                        "username"  => $user_tag,
-                        "last_sent_date" => null // Сбрасываем, чтобы новый пост мог отправиться
+                        "post_date" => $formatted_date, "post_time" => $time,
+                        "post_text" => $content, "username" => $user_tag, "last_sent_date" => null
                     ]);
-                    $reply = "$user_tag, ваш пост добавлен в очередь.";
-                } else {
-                    $reply = "❌ Ошибка в формате даты или времени!";
+                    
+                    $status_text = "$user_tag, ваш пост добавлен в очередь.\n"
+                                 . "Бот опубликует и закрепит его в основном чате в $time (МСК).";
+
+                    telegram_api("sendMessage", [
+                        "chat_id" => $admin_chat_id,
+                        "text" => $status_text,
+                        "parse_mode" => "HTML"
+                    ]);
                 }
             }
-            file_get_contents("https://api.telegram.org/bot$bot_token/sendMessage?chat_id=$admin_chat_id&parse_mode=HTML&text=".urlencode($reply));
         }
 
-        // --- КОМАНДА /e (ПОСМОТРЕТЬ ОЧЕРЕДЬ) ---
+        // КОМАНДА /e (ПРОСМОТР)
         if ($text == '/e') {
             $data = supabase_api("GET", "telegram_tasks?id=eq.1");
             if (!empty($data) && !empty($data[0]['post_text'])) {
                 $t = $data[0];
                 $d = date('d.m.Y', strtotime($t['post_date']));
-                $reply = "<b>📋 ТЕКУЩАЯ ОЧЕРЕДЬ:</b>\n\n"
-                       . "<b>📅 Дата:</b> {$d}\n"
-                       . "<b>⏰ Время:</b> {$t['post_time']} (МСК)\n"
-                       . "<b>👤 Автор:</b> {$t['username']}\n"
-                       . "<b>📝 Текст:</b>\n<i>{$t['post_text']}</i>";
+                $reply = "<b>📋 ТЕКУЩИЙ ПЛАН:</b>\n\n📅 $d | ⏰ {$t['post_time']} (МСК)\n👤 Автор: {$t['username']}\n📝 {$t['post_text']}";
             } else {
-                $reply = "📭 Очередь пуста.";
+                $reply = "📭 В очереди пусто.";
             }
-            file_get_contents("https://api.telegram.org/bot$bot_token/sendMessage?chat_id=$admin_chat_id&parse_mode=HTML&text=".urlencode($reply));
+            telegram_api("sendMessage", ["chat_id" => $admin_chat_id, "text" => $reply, "parse_mode" => "HTML"]);
         }
     }
 }
